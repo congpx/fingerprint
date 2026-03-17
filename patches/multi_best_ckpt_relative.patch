@@ -1,0 +1,182 @@
+--- run_socofing_v3.py	2026-03-06 03:34:04.000000000 +0000
++++ run_socofing_v3.py	2026-03-06 05:56:12.751337321 +0000
+@@ -276,6 +276,43 @@
+     with open(path,"w",encoding="utf-8") as f:
+         json.dump(obj,f,indent=2,ensure_ascii=False)
+ 
++def compute_selection_scores(metrics: Dict) -> Dict[str, float]:
++    ranks = [metrics[s]["rank1"] for s in ["easy", "medium", "hard"] if "rank1" in metrics.get(s, {})]
++    mean_rank1 = float(np.mean(ranks)) if ranks else -1.0
++    hard = metrics.get("hard", {})
++    hard_rank1 = float(hard.get("rank1", -1.0))
++    hard_tar001 = float(hard.get("tar@far=0.001", -1.0))
++    return {
++        "mean_rank1": mean_rank1,
++        "hard_rank1": hard_rank1,
++        "hard_tar001": hard_tar001,
++    }
++
++
++def save_best_checkpoint(outdir: Path, model: nn.Module, label_map: Dict[str, int], args,
++                         metrics: Dict, criterion: str, score: float):
++    ckpt_dir = outdir / "checkpoints"
++    ckpt_dir.mkdir(parents=True, exist_ok=True)
++    ckpt_path = ckpt_dir / f"best_{criterion}.pt"
++    payload = {
++        "model": model.state_dict(),
++        "label_map": label_map,
++        "args": vars(args),
++        "selection_metric": criterion,
++        "selection_score": float(score),
++    }
++    torch.save(payload, ckpt_path)
++    save_json({
++        "selection_metric": criterion,
++        "selection_score": float(score),
++        "metrics": metrics,
++    }, outdir / f"best_val_metrics_{criterion}.json")
++
++    # Giữ tương thích ngược: best.pt vẫn trỏ tới checkpoint theo mean_rank1
++    if criterion == "mean_rank1":
++        torch.save(payload, ckpt_dir / "best.pt")
++        save_json(metrics, outdir / "best_val_metrics.json")
++
+ def train(args):
+     data_root = Path(args.data_root)
+     df = pd.read_csv(args.index)
+@@ -310,7 +347,7 @@
+     outdir = Path(args.outdir)
+     (outdir/"checkpoints").mkdir(parents=True, exist_ok=True)
+ 
+-    best = -1.0
++    best_scores = {"mean_rank1": -1.0, "hard_rank1": -1.0, "hard_tar001": -1.0}
+     history = []
+ 
+     for epoch in range(1, args.epochs+1):
+@@ -335,11 +372,16 @@
+         metrics = evaluate_retrieval(model, val_df, data_root,
+                                      batch=args.eval_batch, workers=args.workers, device=device,
+                                      probe_alt_types=val_alt)
+-        # mean rank1 across available severities
+-        ranks = [metrics[s]["rank1"] for s in ["easy","medium","hard"] if "rank1" in metrics[s]]
+-        mean_rank1 = float(np.mean(ranks)) if len(ranks)>0 else 0.0
++        scores = compute_selection_scores(metrics)
++        mean_rank1 = scores["mean_rank1"]
+ 
+-        row={"epoch": epoch, "train_loss": running/max(1,len(train_loader)), "val_mean_rank1": mean_rank1}
++        row={
++            "epoch": epoch,
++            "train_loss": running/max(1,len(train_loader)),
++            "val_mean_rank1": mean_rank1,
++            "val_hard_rank1": scores["hard_rank1"],
++            "val_hard_tar001": scores["hard_tar001"],
++        }
+         for sev in ["easy","medium","hard"]:
+             for k,v in metrics.get(sev,{}).items():
+                 row[f"val_{sev}_{k}"]=v
+@@ -351,16 +393,17 @@
+             if "rank1" in m:
+                 print(f"  {sev}: rank1={m['rank1']:.4f} rank5={m['rank5']:.4f} eer={m['eer']:.4f} tar@far=0.001={m['tar@far=0.001']:.4f}")
+ 
+-        if mean_rank1 > best:
+-            best = mean_rank1
+-            torch.save({"model": model.state_dict(), "label_map": label_map, "args": vars(args)},
+-                       outdir/"checkpoints"/"best.pt")
+-            save_json(metrics, outdir/"best_val_metrics.json")
+-            pd.DataFrame(history).to_csv(outdir/"history.csv", index=False)
+-            print(f"[SAVE] best -> {outdir/'checkpoints'/'best.pt'}")
++        print(f"    selection: hard_rank1={scores['hard_rank1']:.4f} hard_tar@far=0.001={scores['hard_tar001']:.4f}")
++
++        for criterion, score in scores.items():
++            if score > best_scores[criterion]:
++                best_scores[criterion] = score
++                save_best_checkpoint(outdir, model, label_map, args, metrics, criterion, score)
++                pd.DataFrame(history).to_csv(outdir/"history.csv", index=False)
++                print(f"[SAVE] best_{criterion}.pt (score={score:.4f})")
+ 
+     pd.DataFrame(history).to_csv(outdir/"history.csv", index=False)
+-    print(f"[DONE] best val mean rank1 = {best:.4f}")
++    print("[DONE] best scores = " + ", ".join([f"{k}={v:.4f}" for k,v in best_scores.items()]))
+ 
+ def evaluate(args):
+     data_root = Path(args.data_root)
+--- run_socofing_v3_mixstyle.py	2026-03-06 03:34:04.000000000 +0000
++++ run_socofing_v3_mixstyle.py	2026-03-06 05:56:12.751725786 +0000
+@@ -269,6 +269,41 @@
+     path.parent.mkdir(parents=True, exist_ok=True)
+     json.dump(obj, open(path,"w"), indent=2)
+ 
++def compute_selection_scores(metrics):
++    ranks = [metrics[s]["rank1"] for s in ["easy","medium","hard"] if "rank1" in metrics.get(s,{})]
++    mean_rank1 = float(np.mean(ranks)) if ranks else -1.0
++    hard = metrics.get("hard", {})
++    hard_rank1 = float(hard.get("rank1", -1.0))
++    hard_tar001 = float(hard.get("tar@far=0.001", -1.0))
++    return {
++        "mean_rank1": mean_rank1,
++        "hard_rank1": hard_rank1,
++        "hard_tar001": hard_tar001,
++    }
++
++
++def save_best_checkpoint(outdir: Path, model: nn.Module, label_map, args, metrics, criterion: str, score: float):
++    ckpt_dir = outdir / "checkpoints"
++    ckpt_dir.mkdir(parents=True, exist_ok=True)
++    ckpt_path = ckpt_dir / f"best_{criterion}.pt"
++    payload = {
++        "model": model.state_dict(),
++        "label_map": label_map,
++        "args": vars(args),
++        "selection_metric": criterion,
++        "selection_score": float(score),
++    }
++    torch.save(payload, ckpt_path)
++    save_json({
++        "selection_metric": criterion,
++        "selection_score": float(score),
++        "metrics": metrics,
++    }, outdir / f"best_val_metrics_{criterion}.json")
++
++    if criterion == "mean_rank1":
++        torch.save(payload, ckpt_dir / "best.pt")
++        save_json(metrics, outdir / "best_val_metrics.json")
++
+ def train(args):
+     root=Path(args.data_root)
+     df=pd.read_csv(args.index)
+@@ -298,7 +333,7 @@
+     scaler=torch.amp.GradScaler("cuda", enabled=args.amp)
+ 
+     outdir=Path(args.outdir); (outdir/"checkpoints").mkdir(parents=True, exist_ok=True)
+-    best=-1.0
++    best_scores={"mean_rank1": -1.0, "hard_rank1": -1.0, "hard_tar001": -1.0}
+ 
+     for epoch in range(1, args.epochs+1):
+         model.train()
+@@ -318,17 +353,18 @@
+ 
+         val_df=df[df.split=="val"].copy()
+         metrics=eval_retrieval(model, val_df, root, args.eval_batch, args.workers, device, probe_alt=val_alt)
+-        ranks=[metrics[s]["rank1"] for s in ["easy","medium","hard"] if "rank1" in metrics[s]]
+-        mean=float(np.mean(ranks)) if ranks else 0.0
++        scores=compute_selection_scores(metrics)
++        mean=scores["mean_rank1"]
+ 
+         print(f"\n[VAL] epoch={epoch} mean_rank1={mean:.4f} mix(p={args.mix_p},a={args.mix_alpha},layer={args.mix_layer}) val_alt={val_alt or 'ALL'}")
+-        if mean>best:
+-            best=mean
+-            torch.save({"model": model.state_dict(), "label_map": label_map, "args": vars(args)}, outdir/"checkpoints"/"best.pt")
+-            save_json(metrics, outdir/"best_val_metrics.json")
+-            print("[SAVE] best ->", outdir/"checkpoints"/"best.pt")
++        print(f"    selection: hard_rank1={scores['hard_rank1']:.4f} hard_tar@far=0.001={scores['hard_tar001']:.4f}")
++        for criterion, score in scores.items():
++            if score > best_scores[criterion]:
++                best_scores[criterion] = score
++                save_best_checkpoint(outdir, model, label_map, args, metrics, criterion, score)
++                print(f"[SAVE] best_{criterion}.pt (score={score:.4f})")
+ 
+-    print(f"[DONE] best val mean rank1 = {best:.4f}")
++    print("[DONE] best scores = " + ", ".join([f"{k}={v:.4f}" for k,v in best_scores.items()]))
+ 
+ def evaluate(args):
+     root=Path(args.data_root)

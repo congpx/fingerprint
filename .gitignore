@@ -1,0 +1,14 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.log
+.env
+.env.*
+*.pem
+*.key
+finger.ssh*
+.DS_Store
+.idea/
+.vscode/
